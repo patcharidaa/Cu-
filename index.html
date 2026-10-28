@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Fourier Curve Animator</title>
+<style>
+:root{color-scheme:dark;--bg:#0a0c12;--panel:#141925;--ink:#f0eadb;--muted:#a8b0c0;--gold:#e8c979;--line:#30394b}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px system-ui,-apple-system,sans-serif}
+header{padding:22px clamp(16px,4vw,42px) 14px;border-bottom:1px solid var(--line)}
+h1{font-size:clamp(22px,4vw,32px);margin:0 0 6px}header p{margin:0;color:var(--muted)}
+main{display:grid;grid-template-columns:minmax(280px,390px) 1fr;gap:16px;padding:16px;max-width:1500px;margin:auto}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;min-width:0}
+label{display:block;font-size:13px;color:#c8d0df;margin:13px 0 6px}
+textarea,input,select{width:100%;border:1px solid #3a4559;background:#0b1019;color:var(--ink);border-radius:7px;padding:10px;font:14px ui-monospace,SFMono-Regular,Consolas,monospace}
+textarea{resize:vertical;min-height:92px}button{border:1px solid #786538;background:#332b1a;color:#ffebbd;border-radius:8px;padding:10px 13px;font-weight:650;cursor:pointer}
+button.secondary{background:#202838;border-color:#3a4559;color:var(--ink)}.buttons{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+.help{font-size:12px;color:var(--muted);line-height:1.55}.equation{font-family:Georgia,serif;color:#ffe6a2;overflow-wrap:anywhere}
+canvas{width:100%;height:min(68vh,720px);display:block;background:#080a11;border-radius:8px}
+.stage{display:flex;flex-direction:column;gap:10px}.readout{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;color:var(--muted);font-size:12px}
+#message{white-space:pre-wrap;color:#ffcf9a;font-size:12px;margin-top:10px}
+#result{font:13px ui-monospace,monospace;color:#d8e0f0;white-space:pre-wrap;overflow-wrap:anywhere;background:#0b1019;border:1px solid var(--line);padding:10px;border-radius:7px}
+@media(max-width:850px){main{grid-template-columns:1fr}canvas{height:52vh}}
+</style>
+</head>
+<body>
+<header><h1>Fourier Curve Animator</h1><p>Enter a complex Fourier series or parametric equations, then animate the traced curve.</p></header>
+<main>
+<section class="panel">
+  <div class="help">Use <span class="equation">t</span> as the parameter. For complex series, use <span class="equation">z(t) = Σ cₙ e^(int)</span>. Enter the real and imaginary parts as expressions using the syntax below.</div>
+  <label for="mode">Equation type</label>
+  <select id="mode"><option value="complex">Complex Fourier series (real + imaginary parts)</option><option value="param">Parametric equations x(t), y(t)</option></select>
+  <div id="complexFields">
+    <label for="real">Real part x(t)</label>
+    <textarea id="real">cos(t) + 0.35*cos(3*t) - 0.15*cos(5*t)</textarea>
+    <label for="imag">Imaginary part y(t)</label>
+    <textarea id="imag">sin(t) - 0.35*sin(3*t) - 0.15*sin(5*t)</textarea>
+  </div>
+  <div id="paramFields" hidden>
+    <label for="xexpr">x(t)</label><textarea id="xexpr">16*sin(t)^3</textarea>
+    <label for="yexpr">y(t)</label><textarea id="yexpr">13*cos(t)-5*cos(2*t)-2*cos(3*t)-cos(4*t)</textarea>
+  </div>
+  <label for="start">Parameter start</label><input id="start" value="0" />
+  <label for="end">Parameter end</label><input id="end" value="2*pi" />
+  <label for="speed">Duration (seconds)</label><input id="speed" type="number" min="1" max="120" value="8" />
+  <label for="samples">Samples (smoothness)</label><input id="samples" type="number" min="200" max="10000" step="100" value="2400" />
+  <div class="buttons"><button id="run">Run / redraw</button><button id="play" class="secondary">Play / pause</button><button id="clear" class="secondary">Clear</button></div>
+  <div id="message"></div>
+  <label>Equation used</label><div id="result">Your curve equation will appear here.</div>
+  <div class="buttons"><button id="copy" class="secondary">Copy equation</button></div>
+  <label>Syntax quick guide</label>
+  <div class="help">
+  Allowed: <code>t</code>, numbers, <code>pi</code>, <code>e</code>, <code>+</code> <code>-</code> <code>*</code> <code>/</code> <code>^</code>, parentheses, and functions <code>sin cos tan asin acos atan sqrt abs exp log</code>.<br>
+  Examples: <code>cos(t)+0.5*cos(4*t)</code>, <code>sin(2*t)</code>, <code>t/2</code>.<br>
+  Use explicit multiplication: <code>2*t</code>, not <code>2t</code>. This evaluates expressions locally in your browser; no server needed.
+  </div>
+</section>
+<section class="panel stage">
+  <div class="readout"><span id="progress">Ready</span><span>Gold = traced path · pale dot = moving point</span></div>
+  <canvas id="canvas"></canvas>
+  <div class="help">Tip: For a Fourier series, enter the expanded real and imaginary parts. For example, <span class="equation">z(t)=e^(it)+0.3e^(-2it)</span> becomes x(t) = cos(t)+0.3cos(2t), y(t) = sin(t)-0.3sin(2t).</div>
+</section>
+</main>
+<script>
+(() => {
+const $=id=>document.getElementById(id), canvas=$('canvas'), ctx=canvas.getContext('2d');
+let pts=[], playing=false, raf=0, startTime=0, duration=8, drawn=0, bounds=null;
+const allowed={sin:Math.sin,cos:Math.cos,tan:Math.tan,asin:Math.asin,acos:Math.acos,atan:Math.atan,sqrt:Math.sqrt,abs:Math.abs,exp:Math.exp,log:Math.log};
+function compile(expr){
+  let s=expr.trim().toLowerCase().replace(/\bpi\b/g,'Math.PI').replace(/\be\b/g,'Math.E');
+  // Only allow numbers, arithmetic, t, parentheses, dots, and named math functions.
+  const scrub=s.replace(/Math\.PI|Math\.E/g,'').replace(/\b(?:sin|cos|tan|asin|acos|atan|sqrt|abs|exp|log)\b/g,'').replace(/\bt\b/g,'').replace(/[0-9eE.+\-*/^()\s]/g,'');
+  if(scrub.length) throw new Error('Unsupported characters or function: '+scrub);
+  s=s.replace(/\b(sin|cos|tan|asin|acos|atan|sqrt|abs|exp|log)\b/g,'Math.$1').replace(/\^/g,'**');
+  let fn; try{fn=new Function('t','"use strict"; return ('+s+');')}catch(e){throw new Error('Could not parse expression: '+expr)}
+  return t=>{const v=fn(t);if(!Number.isFinite(v))throw new Error('Equation produced a non-finite value. Check the domain.');return v}
+}
+function getFns(){
+  if($('mode').value==='complex')return [compile($('real').value),compile($('imag').value)];
+  return [compile($('xexpr').value),compile($('yexpr').value)];
+}
+function setMode(){const c=$('mode').value==='complex';$('complexFields').hidden=!c;$('paramFields').hidden=c}
+$('mode').addEventListener('change',setMode);
+function resize(){
+ const r=canvas.getBoundingClientRect(),dpr=Math.min(devicePixelRatio||1,2);
+ canvas.width=Math.max(1,Math.floor(r.width*dpr));canvas.height=Math.max(1,Math.floor(r.height*dpr));
+ ctx.setTransform(dpr,0,0,dpr,0,0);render(drawn);
+}
+addEventListener('resize',resize);
+function calculate(){
+ const [fx,fy]=getFns(),a=compile($('start').value)(0),b=compile($('end').value)(0);
+ if(!(b>a))throw new Error('Parameter end must be greater than parameter start.');
+ const n=Math.max(200,Math.min(10000,Number($('samples').value)||2400));
+ const raw=[];
+ for(let i=0;i<=n;i++){const t=a+(b-a)*i/n;raw.push({x:fx(t),y:fy(t),t})}
+ let minX=Infinity,maxX=-Infinity,minY=Infinity,maxY=-Infinity;
+ for(const p of raw){minX=Math.min(minX,p.x);maxX=Math.max(maxX,p.x);minY=Math.min(minY,p.y);maxY=Math.max(maxY,p.y)}
+ if(![minX,maxX,minY,maxY].every(Number.isFinite))throw new Error('Equation has invalid bounds.');
+ if(maxX-minX<1e-9){minX-=.5;maxX+=.5} if(maxY-minY<1e-9){minY-=.5;maxY+=.5}
+ pts=raw;bounds={minX,maxX,minY,maxY};duration=Math.max(1,Math.min(120,Number($('speed').value)||8));
+ const x=$('mode').value==='complex'?$('real').value:$('xexpr').value;
+ const y=$('mode').value==='complex'?$('imag').value:$('yexpr').value;
+ $('result').textContent='z(t) = ('+x+') + i('+y+')\n t ∈ ['+$('start').value+', '+$('end').value+']';
+ drawn=0;playing=false;$('play').textContent='Play';render(0);$('progress').textContent='Curve ready · '+n+' segments';
+}
+function render(count){
+ const w=canvas.clientWidth,h=canvas.clientHeight;if(!w||!h)return;
+ ctx.clearRect(0,0,w,h);ctx.fillStyle='#080a11';ctx.fillRect(0,0,w,h);
+ // subtle center cross
+ ctx.strokeStyle='rgba(150,165,190,.12)';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(w/2,0);ctx.lineTo(w/2,h);ctx.moveTo(0,h/2);ctx.lineTo(w,h/2);ctx.stroke();
+ if(!pts.length||!bounds)return;
+ const pad=Math.min(45,w*.08,h*.08), sx=(w-2*pad)/(bounds.maxX-bounds.minX),sy=(h-2*pad)/(bounds.maxY-bounds.minY),scale=Math.min(sx,sy);
+ const ox=w/2-(bounds.minX+bounds.maxX)/2*scale,oy=h/2+(bounds.minY+bounds.maxY)/2*scale;
+ const xy=p=>({x:ox+p.x*scale,y:oy-p.y*scale});
+ const upto=Math.max(0,Math.min(pts.length-1,Math.floor(count)));
+ ctx.lineWidth=1.7;ctx.lineJoin='round';ctx.lineCap='round';ctx.strokeStyle='#e8c979';ctx.shadowColor='#c79d44';ctx.shadowBlur=7;ctx.beginPath();
+ for(let i=0;i<=upto;i++){const p=xy(pts[i]);if(i===0)ctx.moveTo(p.x,p.y);else ctx.lineTo(p.x,p.y)}ctx.stroke();ctx.shadowBlur=0;
+ if(upto>0){const p=xy(pts[upto]);ctx.beginPath();ctx.arc(p.x,p.y,4,0,Math.PI*2);ctx.fillStyle='#fff3ca';ctx.shadowColor='#f5d77d';ctx.shadowBlur=14;ctx.fill();ctx.shadowBlur=0}
+}
+function frame(now){
+ if(!playing)return;
+ const fraction=Math.min(1,(now-startTime)/(duration*1000));
+ drawn=fraction*(pts.length-1);render(drawn);
+ $('progress').textContent='Tracing · '+Math.round(fraction*100)+'%';
+ if(fraction>=1){playing=false;$('play').textContent='Play';$('progress').textContent='Complete';return}
+ raf=requestAnimationFrame(frame);
+}
+function play(){
+ if(!pts.length){try{calculate()}catch(e){$('message').textContent=e.message;return}}
+ if(playing){playing=false;cancelAnimationFrame(raf);$('play').textContent='Play';return}
+ if(drawn>=pts.length-1)drawn=0;
+ playing=true;startTime=performance.now()-(drawn/(pts.length-1))*duration*1000;$('play').textContent='Pause';raf=requestAnimationFrame(frame)
+}
+$('run').addEventListener('click',()=>{try{$('message').textContent='';calculate()}catch(e){$('message').textContent=e.message}});
+$('play').addEventListener('click',play);
+$('clear').addEventListener('click',()=>{playing=false;cancelAnimationFrame(raf);pts=[];bounds=null;drawn=0;ctx.clearRect(0,0,canvas.width,canvas.height);$('progress').textContent='Cleared'});
+$('copy').addEventListener('click',async()=>{try{await navigator.clipboard.writeText($('result').textContent);$('message').textContent='Equation copied.'}catch(e){$('message').textContent='Select and copy the equation text manually.'}});
+$('real').addEventListener('input',()=>{});$('imag').addEventListener('input',()=>{});
+setMode();resize();try{calculate()}catch(e){$('message').textContent=e.message}
+})();
+</script>
+</body>
+</html>
