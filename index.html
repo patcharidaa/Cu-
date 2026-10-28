@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SVG to Fourier Equations</title>
+<style>
+:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#090c13;color:#f3eee2;font:15px system-ui,sans-serif}
+header{padding:20px 4vw;border-bottom:1px solid #30394b}h1{margin:0 0 5px;font-size:clamp(22px,4vw,32px)}p{color:#b3bdce;line-height:1.5}
+main{max-width:1300px;margin:auto;padding:16px;display:grid;grid-template-columns:minmax(280px,380px) 1fr;gap:16px}.panel{background:#141a25;border:1px solid #30394b;border-radius:12px;padding:15px;min-width:0}
+label{display:block;margin:12px 0 6px;color:#d7deeb;font-size:13px}input,select,textarea{width:100%;background:#0b1019;color:#f3eee2;border:1px solid #3b465a;border-radius:7px;padding:9px}button{background:#3b301a;color:#ffe8ad;border:1px solid #806b3b;padding:10px 13px;border-radius:7px;cursor:pointer;font-weight:650}.row{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}.help{font-size:12px;color:#aeb8ca;line-height:1.55}canvas{width:100%;height:min(62vh,650px);display:block;background:#080a11;border-radius:8px}#equations{white-space:pre-wrap;overflow-wrap:anywhere;max-height:300px;overflow:auto;background:#090e17;border:1px solid #30394b;padding:10px;border-radius:7px;font:12px ui-monospace,monospace;color:#f0d994}#status{white-space:pre-wrap;color:#ffcc9c;font-size:12px;margin-top:9px}#equations a{color:#f0d994}@media(max-width:850px){main{grid-template-columns:1fr}canvas{height:48vh}}
+</style>
+</head>
+<body>
+<header><h1>SVG → Complex Fourier Equations</h1><p>Upload a vector logo. This tool samples its SVG paths, calculates Fourier coefficients, animates the reconstruction, and exports the equations.</p></header>
+<main>
+<section class="panel">
+ <div class="help"><b>How to use:</b> download an emblem as an <code>.svg</code> file, choose it below, then press <b>Calculate Fourier equations</b>. This runs locally in your browser.</div>
+ <label for="file">SVG file</label><input id="file" type="file" accept=".svg,image/svg+xml">
+ <label for="harmonics">Fourier harmonics per path</label><input id="harmonics" type="number" min="5" max="80" value="24">
+ <label for="samples">Samples per path</label><input id="samples" type="number" min="128" max="1200" step="64" value="512">
+ <label for="duration">Animation duration (seconds)</label><input id="duration" type="number" min="2" max="90" value="10">
+ <div class="row"><button id="calculate">Calculate Fourier equations</button><button id="play">Play / replay</button><button id="download">Download equations .txt</button></div>
+ <div id="status">Choose an SVG file to begin.</div>
+ <label>Generated equations</label><div id="equations">After calculation, each path's complex Fourier series will appear here.</div>
+ <p class="help">Each path is treated as its own closed contour. The approximation quality depends on the number of harmonics. Fine details may require more harmonics. This tool samples SVG paths, so logos that use shapes other than paths may need conversion to paths in a vector editor first.</p>
+</section>
+<section class="panel">
+ <canvas id="canvas"></canvas>
+ <p class="help">Gold lines are the reconstructed curves. The bright point follows the path being drawn. If the SVG contains many paths, they are traced in order of path length.</p>
+</section>
+</main>
+<script>
+(() => {
+const $=id=>document.getElementById(id), canvas=$('canvas'), ctx=canvas.getContext('2d');
+let paths=[], bounds=null, startAt=0, running=false, duration=10, raf=0, equationText='';
+function resize(){const r=canvas.getBoundingClientRect(),d=Math.min(devicePixelRatio||1,2);canvas.width=Math.max(1,Math.floor(r.width*d));canvas.height=Math.max(1,Math.floor(r.height*d));ctx.setTransform(d,0,0,d,0,0);draw(0)}
+addEventListener('resize',resize);
+function dft(points,H){const M=points.length,cs=[];for(let n=-H;n<=H;n++){let re=0,im=0;for(let j=0;j<M;j++){const a=-2*Math.PI*n*j/M,p=points[j];re+=p.x*Math.cos(a)-p.y*Math.sin(a);im+=p.x*Math.sin(a)+p.y*Math.cos(a)}cs.push({n,re:re/M,im:im/M,amp:Math.hypot(re/M,im/M)})}return cs}
+function evalSeries(cs,t){let x=0,y=0;for(const c of cs){const a=c.n*t,co=Math.cos(a),si=Math.sin(a);x+=c.re*co-c.im*si;y+=c.re*si+c.im*co}return{x,y}}
+function fmt(x){return (Math.abs(x)<5e-8?0:x).toFixed(5)}
+function makeEquation(cs,index){const terms=cs.slice().sort((a,b)=>a.n-b.n).map(c=>`(${fmt(c.re)}${c.im<0?'':'+'}${fmt(c.im)}i)e^(${c.n}it)`);return `Path ${index+1}:\nz_${index+1}(t) = ${terms.join(' + ')}\nwhere 0 ≤ t ≤ 2π`}
+async function processSvg(file){
+ const text=await file.text(),doc=new DOMParser().parseFromString(text,'image/svg+xml');
+ if(doc.querySelector('parsererror'))throw Error('This file is not valid SVG.');
+ const svg=doc.documentElement;
+ const vb=(svg.getAttribute('viewBox')||'0 0 100 100').trim().split(/[ ,]+/).map(Number);
+ const width=Number(svg.getAttribute('width'))||vb[2],height=Number(svg.getAttribute('height'))||vb[3];
+ const host=document.createElement('div');host.style.cssText=`position:fixed;left:-20000px;top:0;width:${width}px;height:${height}px;overflow:visible`;
+ const live=document.importNode(svg,true);live.setAttribute('width',width);live.setAttribute('height',height);host.appendChild(live);document.body.appendChild(host);
+ await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+ const all=[];
+ for(const el of live.querySelectorAll('path, polyline, polygon, line, rect, circle, ellipse')){
+   let path=el;
+   if(el.tagName.toLowerCase()!=='path'){
+     const ns='http://www.w3.org/2000/svg',p=document.createElementNS(ns,'path');
+     try{
+       if(el.tagName.toLowerCase()==='polygon'||el.tagName.toLowerCase()==='polyline') {const pts=el.points;let d='';for(let i=0;i<pts.numberOfItems;i++){const q=pts.getItem(i);d+=(i?'L':'M')+q.x+' '+q.y}if(el.tagName.toLowerCase()==='polygon')d+='Z';p.setAttribute('d',d)}
+       else if(el.tagName.toLowerCase()==='line')p.setAttribute('d',`M${el.x1.baseVal.value} ${el.y1.baseVal.value}L${el.x2.baseVal.value} ${el.y2.baseVal.value}`);
+       else if(el.tagName.toLowerCase()==='rect'){const x=el.x.baseVal.value,y=el.y.baseVal.value,w=el.width.baseVal.value,h=el.height.baseVal.value;p.setAttribute('d',`M${x} ${y}H${x+w}V${y+h}H${x}Z`)}
+       else {const cx=el.cx.baseVal.value,cy=el.cy.baseVal.value,rx=el.tagName.toLowerCase()==='circle'?el.r.baseVal.value:el.rx.baseVal.value,ry=el.tagName.toLowerCase()==='circle'?el.r.baseVal.value:el.ry.baseVal.value;p.setAttribute('d',`M${cx-rx} ${cy}a${rx} ${ry} 0 1 0 ${2*rx} 0a${rx} ${ry} 0 1 0 ${-2*rx} 0`)}
+       el.parentNode.insertBefore(p,el);path=p;
+     }catch(e){continue}
+   }
+   let len=0;try{len=path.getTotalLength()}catch(e){}if(!len||len<1)continue;
+   const matrix=path.getScreenCTM();if(!matrix)continue;
+   const M=Math.max(128,Math.min(1200,Number($('samples').value)||512)),pts=[];
+   for(let j=0;j<M;j++){const q=path.getPointAtLength(len*j/M),s=new DOMPoint(q.x,q.y).matrixTransform(matrix);pts.push({x:s.x,y:-s.y})}
+   all.push({pts,len});
+ }
+ host.remove();
+ if(!all.length)throw Error('No usable vector paths were found. Try a different SVG.');
+ const flat=all.flatMap(a=>a.pts),minX=Math.min(...flat.map(p=>p.x)),maxX=Math.max(...flat.map(p=>p.x)),minY=Math.min(...flat.map(p=>p.y)),maxY=Math.max(...flat.map(p=>p.y));
+ const cx=(minX+maxX)/2,cy=(minY+maxY)/2,span=Math.max(maxX-minX,maxY-minY)||1;
+ const H=Math.max(5,Math.min(80,Number($('harmonics').value)||24));
+ paths=all.map(a=>{const points=a.pts.map(p=>({x:(p.x-cx)/span,y:(p.y-cy)/span}));return{points,coeffs:dft(points,H),len:a.len}}).sort((a,b)=>b.len-a.len);
+ bounds={minX:-.5,maxX:.5,minY:-.5,maxY:.5};duration=Math.max(2,Math.min(90,Number($('duration').value)||10));
+ equationText=paths.map((p,i)=>makeEquation(p.coeffs,i)).join('\n\n');
+ $('equations').textContent=equationText;
+ $('status').textContent=`Calculated ${paths.length} paths with ${2*H+1} coefficients per path. Use Play / replay to watch the Fourier reconstruction.`;
+ running=false;draw(0);
+}
+function draw(fraction){
+ const w=canvas.clientWidth,h=canvas.clientHeight;if(!w||!h)return;
+ ctx.clearRect(0,0,w,h);ctx.fillStyle='#080a11';ctx.fillRect(0,0,w,h);
+ if(!paths.length)return;
+ const scale=Math.min(w*.84,h*.84),ox=w/2,oy=h/2;
+ const total=paths.reduce((s,p)=>s+p.len,0);let remain=Math.max(0,Math.min(1,fraction))*total;
+ ctx.lineWidth=1.35;ctx.lineCap='round';ctx.lineJoin='round';ctx.strokeStyle='#e8c979';ctx.shadowColor='#c79d44';ctx.shadowBlur=7;
+ let head=null;
+ for(const p of paths){
+   if(remain<=0)break;
+   const f=Math.min(1,remain/p.len),steps=Math.max(2,Math.floor(p.points.length*f));ctx.beginPath();
+   for(let j=0;j<steps;j++){const q=evalSeries(p.coeffs,2*Math.PI*j/p.points.length),x=ox+q.x*scale,y=oy+q.y*scale;if(j===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);head={x,y}}
+   ctx.stroke();remain-=p.len;
+   if(f<1)break;
+ }
+ ctx.shadowBlur=0;if(head){ctx.beginPath();ctx.arc(head.x,head.y,3,0,2*Math.PI);ctx.fillStyle='#fff4c9';ctx.fill()}
+}
+function frame(now){if(!running)return;const frac=Math.min(1,(now-startAt)/(duration*1000));draw(frac);if(frac>=1){running=false;$('status').textContent='Trace complete.';return}raf=requestAnimationFrame(frame)}
+$('calculate').addEventListener('click',async()=>{try{if(!$('file').files[0])throw Error('Choose an SVG file first.');$('status').textContent='Sampling paths and calculating coefficients…';await processSvg($('file').files[0])}catch(e){$('status').textContent=e.message}});
+$('play').addEventListener('click',()=>{if(!paths.length){$('status').textContent='Choose an SVG and calculate its Fourier equations first.';return}cancelAnimationFrame(raf);running=true;startAt=performance.now();$('status').textContent='Tracing Fourier reconstruction…';raf=requestAnimationFrame(frame)});
+$('download').addEventListener('click',()=>{if(!equationText){$('status').textContent='Calculate equations first.';return}const blob=new Blob([equationText],{type:'text/plain;charset=utf-8'}),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='phra-kiao-fourier-equations.txt';a.click();URL.revokeObjectURL(a.href)});
+resize();
+})();
+</script>
+</body>
+</html>
