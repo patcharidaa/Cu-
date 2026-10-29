@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SVG to Fourier Equations</title>
+<style>
+:root{--paper:#ece6d8;--ink:#1d1b17;--mute:#6f6a5d;--rule:#1d1b17;--plate:#0e0d0b;--gold:#d8b45c}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.5 Georgia,"Times New Roman",serif}
+header{padding:28px 5vw 18px;border-bottom:1px solid var(--rule)}
+h1{margin:0;font-weight:400;font-size:clamp(24px,3.6vw,36px);letter-spacing:-.01em}
+header p{margin:6px 0 0;color:var(--mute);max-width:60ch}
+main{display:grid;grid-template-columns:minmax(280px,360px) 1fr;min-height:calc(100vh - 110px)}
+.panel{min-width:0;padding:22px 5vw 28px}
+.controls{border-right:1px solid var(--rule);padding-right:28px;padding-left:5vw}
+label{display:block;margin:18px 0 4px;font:12px/1.3 ui-monospace,Menlo,Consolas,monospace;color:var(--mute)}
+input[type=number],input[type=file]{width:100%;background:transparent;color:var(--ink);border:0;border-bottom:1px solid var(--ink);border-radius:0;padding:6px 0;font:14px ui-monospace,Menlo,Consolas,monospace}
+input:focus{outline:0;border-bottom-width:2px}
+input[type=file]{font-size:12px;padding:8px 0}
+.row{display:flex;gap:8px;flex-wrap:wrap;margin-top:24px}
+button{background:transparent;color:var(--ink);border:1px solid var(--ink);padding:8px 12px;cursor:pointer;font:12px ui-monospace,Menlo,Consolas,monospace}
+button:hover{background:var(--ink);color:var(--paper)}
+.help{font-size:13px;color:var(--mute);line-height:1.5}
+canvas{width:100%;height:min(78vh,820px);display:block;background:var(--plate)}
+#equations{white-space:pre-wrap;overflow-wrap:anywhere;max-height:260px;overflow:auto;border:1px solid var(--rule);padding:10px;font:11px/1.5 ui-monospace,Menlo,Consolas,monospace}
+#status{white-space:pre-wrap;color:var(--ink);font:12px/1.5 ui-monospace,Menlo,Consolas,monospace;margin-top:14px}
+@media(max-width:850px){main{grid-template-columns:1fr}.controls{border-right:0;border-bottom:1px solid var(--rule);padding-right:5vw}canvas{height:60vh}}
+</style>
+</head>
+<body>
+<header><h1>SVG → Complex Fourier Equations</h1><p>Samples the paths of an SVG, computes Fourier coefficients for each, and animates the reconstruction.</p></header>
+<main>
+<section class="panel controls">
+ <label for="file" style="margin-top:0">SVG file</label><input id="file" type="file" accept=".svg,image/svg+xml">
+ <label for="harmonics">Fourier harmonics per path (0 = auto, scales with each contour's size)</label><input id="harmonics" type="number" min="0" max="500" value="0">
+ <label for="samples">Samples per path (0 = auto)</label><input id="samples" type="number" min="0" max="8000" step="1" value="0">
+ <label for="minsize">Skip contours smaller than (px)</label><input id="minsize" type="number" min="0" max="50" step="0.5" value="1.5">
+ <label for="duration">Animation duration (seconds)</label><input id="duration" type="number" min="2" max="90" value="10">
+ <div class="row"><button id="calculate">Calculate</button><button id="play">Play</button><button id="download">Download .txt</button></div>
+ <div id="status">Choose an SVG file to begin.</div>
+ <label>Equations</label><div id="equations">Nothing yet.</div>
+ <p class="help">Each contour gets its own Fourier series. Fourier series are periodic, so open strokes can gain a joining segment. Basic SVG shapes are supported; complex SVG features such as clipping, masks, filters, and external CSS may not reproduce exactly. More harmonics preserve finer detail but cannot fix missing or unsuitable source geometry.</p>
+</section>
+<section class="panel" style="padding-left:28px">
+ <canvas id="canvas"></canvas>
+</section>
+</main>
+<script>
+(() => {
+const $=id=>document.getElementById(id), canvas=$('canvas'), ctx=canvas.getContext('2d');
+let paths=[], bounds=null, startAt=0, running=false, duration=10, raf=0, equationText='';
+function resize(){const r=canvas.getBoundingClientRect(),d=Math.min(devicePixelRatio||1,2);canvas.width=Math.max(1,Math.floor(r.width*d));canvas.height=Math.max(1,Math.floor(r.height*d));ctx.setTransform(d,0,0,d,0,0);draw(0)}
+addEventListener('resize',resize);
+function dft(points,H){const M=points.length,cs=[];for(let n=-H;n<=H;n++){let re=0,im=0;for(let j=0;j<M;j++){const a=-2*Math.PI*n*j/M,p=points[j];re+=p.x*Math.cos(a)-p.y*Math.sin(a);im+=p.x*Math.sin(a)+p.y*Math.cos(a)}cs.push({n,re:re/M,im:im/M,amp:Math.hypot(re/M,im/M)})}return cs}
+function evalSeries(cs,t){let x=0,y=0;for(const c of cs){const a=c.n*t,co=Math.cos(a),si=Math.sin(a);x+=c.re*co-c.im*si;y+=c.re*si+c.im*co}return{x,y}}
+function fmt(x){return (Math.abs(x)<5e-8?0:x).toFixed(5)}
+function makeEquation(cs,index){const terms=cs.slice().sort((a,b)=>a.n-b.n).map(c=>`(${fmt(c.re)}${c.im<0?'':'+'}${fmt(c.im)}i)e^(${c.n}it)`);return `Path ${index+1}:\nz_${index+1}(t) = ${terms.join(' + ')}\nwhere 0 ≤ t ≤ 2π`}
+async function processSvg(file){
+ const text=await file.text(),doc=new DOMParser().parseFromString(text,'image/svg+xml');
+ if(doc.querySelector('parsererror'))throw Error('This file is not valid SVG.');
+ const svg=doc.documentElement;
+ const vb=(svg.getAttribute('viewBox')||'0 0 100 100').trim().split(/[ ,]+/).map(Number);
+ const width=Number(svg.getAttribute('width'))||vb[2],height=Number(svg.getAttribute('height'))||vb[3];
+ const host=document.createElement('div');host.style.cssText=`position:fixed;left:-20000px;top:0;width:${width}px;height:${height}px;overflow:visible`;
+ const live=document.importNode(svg,true);live.setAttribute('width',width);live.setAttribute('height',height);host.appendChild(live);document.body.appendChild(host);
+ await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+ const all=[];let openContours=0;
+ const minSize=Math.max(0,Number($('minsize').value)||0),userM=Number($('samples').value)||0;
+ const sampleContour=(path,matrix,sourceEl)=>{
+   let len=0;try{len=path.getTotalLength()}catch(e){}if(!len||len<0.01)return;
+   const matrixNow=matrix||sourceEl.getScreenCTM();if(!matrixNow)return;
+   const sf=Math.hypot(matrixNow.a,matrixNow.b)||1;
+   // auto: roughly one sample per output pixel of perimeter
+   const M=userM?Math.max(32,Math.min(8000,userM)):Math.max(128,Math.min(6000,Math.ceil(len*sf))),pts=[];
+   for(let j=0;j<M;j++){
+     const q=path.getPointAtLength(len*j/M),s=new DOMPoint(q.x,q.y).matrixTransform(matrixNow);
+     pts.push({x:s.x,y:s.y});
+   }
+   let x0=1e9,x1=-1e9,y0=1e9,y1=-1e9;for(const p of pts){if(p.x<x0)x0=p.x;if(p.x>x1)x1=p.x;if(p.y<y0)y0=p.y;if(p.y>y1)y1=p.y}
+   if(Math.max(x1-x0,y1-y0)<minSize)return;
+   all.push({pts,len:len*sf});
+ };
+ for(const el of live.querySelectorAll('path, polyline, polygon, line, rect, circle, ellipse')){
+   if(el.closest('defs, clipPath, mask, pattern, marker, symbol'))continue;
+   const style=getComputedStyle(el);
+   if(style.display==='none'||style.visibility==='hidden'||Number(style.opacity)===0)continue;
+   const tag=el.tagName.toLowerCase();
+   if(tag==='path'){
+     const d=(el.getAttribute('d')||'').trim();if(!d)continue;
+     // Every M/m starts a new subpath. Treat each contour as its own periodic
+     // curve; otherwise getPointAtLength walks straight across disconnected
+     // contours and creates the spurious zig-zags seen in compound SVG paths.
+     const chunks=d.split(/(?=[Mm])/).map(x=>x.trim()).filter(Boolean);
+     for(const chunk of chunks){
+       const p=document.createElementNS('http://www.w3.org/2000/svg','path');
+       p.setAttribute('d',chunk);
+       // Copy presentation attributes, while retaining the source element's
+       // inherited transforms via insertion as its sibling.
+       for(const a of Array.from(el.attributes))if(a.name!=='d'&&a.name!=='id')p.setAttribute(a.name,a.value);
+       el.parentNode.insertBefore(p,el.nextSibling);
+       const matrix=p.getScreenCTM();
+       sampleContour(p,matrix,el);
+       if(!/[zZ]\s*$/.test(chunk))openContours++;
+       p.remove();
+     }
+   } else {
+     const ns='http://www.w3.org/2000/svg',p=document.createElementNS(ns,'path');
+     try{
+       if(tag==='polygon'||tag==='polyline'){const pts=el.points;let d='';for(let i=0;i<pts.numberOfItems;i++){const q=pts.getItem(i);d+=(i?'L':'M')+q.x+' '+q.y}if(tag==='polygon')d+='Z';p.setAttribute('d',d)}
+       else if(tag==='line')p.setAttribute('d',`M${el.x1.baseVal.value} ${el.y1.baseVal.value}L${el.x2.baseVal.value} ${el.y2.baseVal.value}`);
+       else if(tag==='rect'){const x=el.x.baseVal.value,y=el.y.baseVal.value,w=el.width.baseVal.value,h=el.height.baseVal.value;p.setAttribute('d',`M${x} ${y}H${x+w}V${y+h}H${x}Z`)}
+       else {const cx=el.cx.baseVal.value,cy=el.cy.baseVal.value,rx=tag==='circle'?el.r.baseVal.value:el.rx.baseVal.value,ry=tag==='circle'?el.r.baseVal.value:el.ry.baseVal.value;p.setAttribute('d',`M${cx-rx} ${cy}a${rx} ${ry} 0 1 0 ${2*rx} 0a${rx} ${ry} 0 1 0 ${-2*rx} 0`)}
+       el.parentNode.insertBefore(p,el.nextSibling);sampleContour(p,p.getScreenCTM(),el);p.remove();
+       if(tag==='polyline'||tag==='line')openContours++;
+     }catch(e){p.remove();continue}
+   }
+ }
+ host.remove();
+ if(!all.length)throw Error('No usable vector paths were found. Try a different SVG.');
+ const flat=all.flatMap(a=>a.pts),minX=Math.min(...flat.map(p=>p.x)),maxX=Math.max(...flat.map(p=>p.x)),minY=Math.min(...flat.map(p=>p.y)),maxY=Math.max(...flat.map(p=>p.y));
+ const cx=(minX+maxX)/2,cy=(minY+maxY)/2,span=Math.max(maxX-minX,maxY-minY)||1;
+ const userH=Number($('harmonics').value)||0;let maxH=0,totalCoeffs=0;
+ paths=all.map(a=>{
+   const points=a.pts.map(p=>({x:(p.x-cx)/span,y:(p.y-cy)/span}));
+   const M=points.length;
+   // auto: about one harmonic per 5px of perimeter, so intricate contours get many and tiny ones few
+   let H=userH||Math.round(a.len/5);H=Math.max(3,Math.min(500,H,Math.floor((M-1)/2)));
+   const coeffs=dft(points,H),curve=new Float32Array(2*M);
+   for(let j=0;j<M;j++){const q=evalSeries(coeffs,2*Math.PI*j/M);curve[2*j]=q.x;curve[2*j+1]=q.y}
+   maxH=Math.max(maxH,H);totalCoeffs+=2*H+1;
+   return{points,coeffs,curve,H,len:a.len};
+ }).sort((a,b)=>b.len-a.len);
+ bounds={minX:-.5,maxX:.5,minY:-.5,maxY:.5};duration=Math.max(2,Math.min(90,Number($('duration').value)||10));
+ equationText=paths.map((p,i)=>makeEquation(p.coeffs,i)).join('\n\n');
+ $('equations').textContent=paths.slice(0,3).map((p,i)=>makeEquation(p.coeffs,i).slice(0,3000)+(makeEquation(p.coeffs,i).length>3000?' …':'')).join('\n\n')+(paths.length>3?`\n\n… ${paths.length-3} more paths (and full series) in the downloaded .txt`:'');
+ $('status').textContent=`Calculated ${paths.length} paths, ${totalCoeffs.toLocaleString()} coefficients total (up to ${2*maxH+1} per path).`+(openContours?` Warning: ${openContours} open path(s) are treated as periodic, so each may show a joining segment.`:'')+' Use Play / replay to watch the Fourier reconstruction.';
+ running=false;draw(0);
+}
+function draw(fraction){
+ const w=canvas.clientWidth,h=canvas.clientHeight;if(!w||!h)return;
+ ctx.clearRect(0,0,w,h);ctx.fillStyle='#0e0d0b';ctx.fillRect(0,0,w,h);
+ if(!paths.length)return;
+ const scale=Math.min(w*.84,h*.84),ox=w/2,oy=h/2;
+ const total=paths.reduce((s,p)=>s+p.len,0);let remain=Math.max(0,Math.min(1,fraction))*total;
+ ctx.lineWidth=1;ctx.lineCap='round';ctx.lineJoin='round';ctx.strokeStyle='#d8b45c';
+ let head=null;
+ for(const p of paths){
+   if(remain<=0)break;
+   const f=Math.min(1,remain/p.len),c=p.curve,n=c.length/2,steps=Math.max(2,Math.floor(n*f));ctx.beginPath();
+   for(let j=0;j<steps;j++){const x=ox+c[2*j]*scale,y=oy+c[2*j+1]*scale;if(j===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);head={x,y}}
+   if(f>=1)ctx.closePath();
+   ctx.stroke();remain-=p.len;
+   if(f<1)break;
+ }
+ if(head&&fraction<1){ctx.beginPath();ctx.arc(head.x,head.y,3,0,2*Math.PI);ctx.fillStyle='#f4e7c0';ctx.fill()}
+}
+function frame(now){if(!running)return;const frac=Math.min(1,(now-startAt)/(duration*1000));draw(frac);if(frac>=1){running=false;draw(1);$('status').textContent='Trace complete.';return}raf=requestAnimationFrame(frame)}
+$('calculate').addEventListener('click',async()=>{try{if(!$('file').files[0])throw Error('Choose an SVG file first.');$('status').textContent='Sampling paths and calculating coefficients…';await processSvg($('file').files[0])}catch(e){$('status').textContent=e.message}});
+$('play').addEventListener('click',()=>{if(!paths.length){$('status').textContent='Choose an SVG and calculate its Fourier equations first.';return}cancelAnimationFrame(raf);running=true;startAt=performance.now();$('status').textContent='Tracing Fourier reconstruction…';raf=requestAnimationFrame(frame)});
+$('download').addEventListener('click',()=>{if(!equationText){$('status').textContent='Calculate equations first.';return}const blob=new Blob([equationText],{type:'text/plain;charset=utf-8'}),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='phra-kiao-fourier-equations.txt';a.click();URL.revokeObjectURL(a.href)});
+resize();
+})();
+</script>
+</body>
+</html>
